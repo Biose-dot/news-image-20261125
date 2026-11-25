@@ -1,108 +1,93 @@
 #!/usr/bin/env python3
-"""Entrypoint for the news-image-20261125 entry (Python 3.13 stdlib only).
+"""Deliver the committed front-page image for news-image-20261125.
 
-"The World Today" front page for Wednesday 25 November 2026 — lead
-story: Shenzhou-24 carries the first Pakistani in orbit to Tiangong.
-Writes entry.png (1024x1024) to $MAKEFUN_OUTPUT_DIR (default /output).
+The artwork (entry.png, a 1024x1024 newspaper front page drawn by
+build_image.py at build time) ships inside this repository. At run
+time the grader's container is a bare python:3.13 with no Pillow, so
+this entrypoint does the one job that matters there: place a verified
+copy of entry.png into $MAKEFUN_OUTPUT_DIR (default /output).
 
-Two paths, both deterministic and byte-identical:
-  1. Build path: render the front page with build_image.render()
-     (needs Pillow) and save it straight into the output directory,
-     so it works even when the repository is mounted read-only.
-  2. Fallback path: copy the entry.png shipped in this repository
-     (pure stdlib, used when Pillow is missing -- the grader runs a bare
-     python:3.13 image with no Pillow installed).
-
-Every write is atomic (write to a .tmp file, then os.replace) and the
-result is verified afterwards: PNG magic bytes, IEND trailer (the file
-is a whole image) and file size.
+Standard library only, no network, no clock: the same input file
+always lands byte-for-byte in the output directory.
 """
 
 import hashlib
 import os
-import shutil
 import sys
 
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-PNG_IEND = b"\x00\x00\x00\x00IEND\xaeB`\x82"
+SIGNATURE = b"\x89PNG\r\n\x1a\n"
+TRAILER = b"IEND\xaeB`\x82"
+CHUNK = 128 * 1024
 
 
-def _out_dir():
-    return os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+def output_dir():
+    return os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
 
 
-def _here():
-    return os.path.dirname(os.path.abspath(__file__))
+def asset_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "entry.png")
 
 
-def _sha256(path):
+def digest(path):
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(CHUNK)
+            if not block:
+                break
+            h.update(block)
     return h.hexdigest()
 
 
-def _verify_png(path, expected_size=None):
-    """Check the file is a whole PNG of the expected size (if given)."""
-    with open(path, "rb") as f:
-        data = f.read()
-    if data[:8] != PNG_MAGIC:
-        raise ValueError("not a PNG file: bad magic bytes in %s" % path)
-    if not data.endswith(PNG_IEND):
-        raise ValueError("truncated PNG file: missing IEND trailer in %s"
-                         % path)
-    size = len(data)
-    if size == 0:
-        raise ValueError("empty PNG file: %s" % path)
-    if expected_size is not None and size != expected_size:
-        raise ValueError(
-            "size mismatch for %s: got %d, expected %d" % (path, size, expected_size)
-        )
-    return size
+def check_png(path):
+    """Return the byte size of a complete 1024x1024 PNG, or raise."""
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    if not blob.startswith(SIGNATURE):
+        raise ValueError("bad PNG signature: %s" % path)
+    if TRAILER not in blob[-16:]:
+        raise ValueError("missing IEND trailer: %s" % path)
+    if len(blob) < 1024:
+        raise ValueError("suspiciously small PNG: %s" % path)
+    # IHDR sits right after the signature: length(4) + "IHDR"(4),
+    # then width and height as big-endian uint32 at bytes 16 and 20.
+    if blob[12:16] != b"IHDR":
+        raise ValueError("first chunk is not IHDR: %s" % path)
+    width = int.from_bytes(blob[16:20], "big")
+    height = int.from_bytes(blob[20:24], "big")
+    if (width, height) != (1024, 1024):
+        raise ValueError("expected 1024x1024, got %dx%d: %s"
+                         % (width, height, path))
+    return len(blob)
 
 
-def _atomic_copy(src, dst):
-    """Copy src to dst atomically, then verify the result."""
-    tmp = dst + ".tmp"
-    expected = _verify_png(src)
-    with open(src, "rb") as fin, open(tmp, "wb") as fout:
-        shutil.copyfileobj(fin, fout, 65536)
-    os.replace(tmp, dst)
-    got = _verify_png(dst, expected)
-    return got
-
-
-def fallback_copy():
-    """Pure-stdlib copy of the shipped entry.png into the output dir."""
-    src = os.path.join(_here(), "entry.png")
-    out_dir = _out_dir()
-    os.makedirs(out_dir, exist_ok=True)
-    dst = os.path.join(out_dir, "entry.png")
-    got = _atomic_copy(src, dst)
-    print("fallback_copy: copied entry.png (%d bytes, sha256 %s)"
-          % (got, _sha256(dst)))
+def deliver():
+    src = asset_path()
+    size = check_png(src)
+    target_dir = output_dir()
+    os.makedirs(target_dir, exist_ok=True)
+    dst = os.path.join(target_dir, "entry.png")
+    staging = dst + ".part"
+    with open(src, "rb") as fin, open(staging, "wb") as fout:
+        while True:
+            block = fin.read(CHUNK)
+            if not block:
+                break
+            fout.write(block)
+    os.replace(staging, dst)
+    if check_png(dst) != size or digest(dst) != digest(src):
+        raise ValueError("copied file failed verification: %s" % dst)
+    print("entry.png delivered: %d bytes sha256=%s" % (size, digest(dst)))
     return dst
 
 
 def main():
-    out_dir = _out_dir()
-    os.makedirs(out_dir, exist_ok=True)
-    dst = os.path.join(out_dir, "entry.png")
     try:
-        import build_image  # noqa: F401  (needs Pillow)
-
-        tmp = dst + ".tmp"
-        img = build_image.render()
-        img.save(tmp, "PNG")
-        os.replace(tmp, dst)
-        got = _verify_png(dst)
-        print("build path: wrote entry.png (%d bytes, sha256 %s)"
-              % (got, _sha256(dst)))
-    except Exception as exc:  # noqa: BLE001 - any failure falls back
-        print("build path failed (%s); using fallback_copy" % exc,
-              file=sys.stderr)
-        fallback_copy()
+        deliver()
+    except Exception as exc:
+        print("delivery failed: %s" % exc, file=sys.stderr)
+        return 1
     return 0
 
 
