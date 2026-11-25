@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Entrypoint for the news-image-20261125 entry (Python 3.13 stdlib only).
 
+"The World Today" front page for Wednesday 25 November 2026 — lead
+story: Shenzhou-24 carries the first Pakistani in orbit to Tiangong.
 Writes entry.png (1024x1024) to $MAKEFUN_OUTPUT_DIR (default /output).
 
 Two paths, both deterministic and byte-identical:
